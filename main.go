@@ -5,74 +5,171 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
-)
 
-type LogType int
+	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
+)
 
 const (
-	EXT LogType = iota
-	ATM
-	BASE
-	BOOTSTRAP
+	address  string = "localhost:2222"
+	user     string = "tsabit"
+	password string = "password"
+	logdir   string = "/home/tsabit/logs"
 )
-
-var logKeywords = map[LogType]string{
-	EXT:       "ext",
-	ATM:       "atm",
-	BASE:      "base",
-	BOOTSTRAP: "bootstrap",
-}
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("usage: ttss <srn> <dest_path>")
+		fmt.Println("usage: ttss <srn> <dir>")
+		return
+	}
+	srn, dir := os.Args[1], os.Args[2]
+
+	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+		fmt.Printf("error creating directory: %v\n", err)
 		return
 	}
 
-	srn, destPath := os.Args[1], os.Args[2]
-
-	if err := os.MkdirAll(destPath, 0777); err != nil {
-		fmt.Printf("Error creating directory: %v\n", err)
-		return
-	}
-
-	files, err := os.ReadDir(".")
+	client, err := connectSFTP(address, user, password)
 	if err != nil {
-		fmt.Printf("Error reading directory: %v\n", err)
+		fmt.Printf("error connecting to server: %v\n", err)
 		return
 	}
+	defer client.Close()
 
-	logs := findLatestLogs(files, srn)
-	if len(logs) == 0 {
-		fmt.Println("No matching log files found.")
-		return
-	}
+	keywords := [4]string{"ext", "atm", "base", "bootstrap"}
+	for _, keyword := range keywords {
+		if keyword == "ext" {
+			logs, err := getExtLog(client, logdir, srn)
+			if err != nil {
+				fmt.Printf("error getting ext logs: %v\n", err)
+				return
+			} else if len(logs) == 0 {
+				fmt.Printf("%s log not found\n", keyword)
+				return
+			}
 
-	for _, file := range logs {
-		src := file
-		dst := filepath.Join(destPath, file)
+			for _, log := range logs {
+				if err := downloadLog(client, path.Join(logdir, log), filepath.Join(dir, log)); err != nil {
+					fmt.Printf("error downloading log: %v\n", err)
+					return
+				}
+				fmt.Println(log)
+			}
+		} else {
+			log, err := getLatestLog(client, logdir, keyword)
+			if err != nil {
+				fmt.Printf("error getting %s logs: %v\n", keyword, err)
+				return
+			} else if log == "" {
+				fmt.Printf("%s log not found\n", keyword)
+				return
+			}
 
-		if err := copyFile(src, dst); err != nil {
-			fmt.Printf("Error copying file %s: %v\n", src, err)
-			return
+			if err := downloadLog(client, path.Join(logdir, log), filepath.Join(dir, log)); err != nil {
+				fmt.Printf("error downloading log: %v\n", err)
+				return
+			}
+
+			fmt.Println(log)
 		}
-		fmt.Printf("Copied %s to %s\n", src, dst)
 	}
-
-	fmt.Println("Done")
 }
 
-func copyFile(src, dst string) error {
-	srcFile, err := os.Open(src)
+func connectSFTP(addr, user, password string) (*sftp.Client, error) {
+	config := &ssh.ClientConfig{
+		User:            user,
+		Auth:            []ssh.AuthMethod{ssh.Password(password)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	}
+
+	conn, err := ssh.Dial("tcp", addr, config)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := sftp.NewClient(conn)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	return client, nil
+}
+
+func getLatestLog(client *sftp.Client, dir, keyword string) (string, error) {
+	logs, err := client.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+
+	var latestLog string
+	var latestTime time.Time
+
+	for _, log := range logs {
+		if log.IsDir() || !strings.HasPrefix(log.Name(), keyword) {
+			continue
+		}
+		if log.ModTime().After(latestTime) {
+			latestTime = log.ModTime()
+			latestLog = log.Name()
+		}
+	}
+	return latestLog, nil
+}
+
+func getExtLog(client *sftp.Client, logdir, srn string) ([]string, error) {
+	var result []string
+	logs, err := client.ReadDir(logdir)
+	if err != nil {
+		return result, err
+	}
+
+	for _, log := range logs {
+		if log.IsDir() || !strings.HasPrefix(log.Name(), "ext") {
+			continue
+		}
+
+		file, err := client.Open(path.Join(logdir, log.Name()))
+		if err != nil {
+			return result, err
+		}
+		defer file.Close()
+
+		scanner := bufio.NewScanner(file)
+		found := false
+		for scanner.Scan() {
+			if strings.Contains(scanner.Text(), srn) {
+				result = append(result, log.Name())
+				found = true
+				break
+			}
+		}
+		file.Close()
+
+		if err := scanner.Err(); err != nil {
+			return result, err
+		}
+
+		if found {
+			continue
+		}
+	}
+
+	return result, nil
+}
+
+func downloadLog(client *sftp.Client, remotePath, localPath string) error {
+	srcFile, err := client.Open(remotePath)
 	if err != nil {
 		return err
 	}
 	defer srcFile.Close()
 
-	dstFile, err := os.Create(dst)
+	dstFile, err := os.Create(localPath)
 	if err != nil {
 		return err
 	}
@@ -80,60 +177,4 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(dstFile, srcFile)
 	return err
-}
-
-func containsSRN(filename, srn string) bool {
-	file, err := os.Open(filename)
-	if err != nil {
-		return false
-	}
-	defer file.Close()
-
-	reader := bufio.NewReader(file)
-	for {
-		line, err := reader.ReadString('\n')
-		if strings.Contains(line, srn) {
-			return true
-		}
-		if err != nil {
-			break
-		}
-	}
-
-	return false
-}
-
-func findLatestLogs(files []os.DirEntry, srn string) map[LogType]string {
-	logs := make(map[LogType]string)
-
-	for logType, keyword := range logKeywords {
-		var latestFile string
-		var latestTime time.Time
-
-		for _, file := range files {
-			if file.IsDir() || !strings.Contains(file.Name(), keyword) {
-				continue
-			}
-
-			if logType == EXT && !containsSRN(file.Name(), srn) {
-				continue
-			}
-
-			info, err := file.Info()
-			if err != nil {
-				continue
-			}
-
-			if info.ModTime().After(latestTime) {
-				latestTime = info.ModTime()
-				latestFile = file.Name()
-			}
-		}
-
-		if latestFile != "" {
-			logs[logType] = latestFile
-		}
-	}
-
-	return logs
 }
