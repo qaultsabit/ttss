@@ -136,7 +136,6 @@ func connectSFTP(addr, user, password string) (*sftp.Client, error) {
 func getLatestLog(logs []os.FileInfo, keyword string) (string, time.Time, error) {
 	var latestLog string
 	var latestTime time.Time
-	var logModTime time.Time
 	found := false
 
 	for _, log := range logs {
@@ -151,10 +150,10 @@ func getLatestLog(logs []os.FileInfo, keyword string) (string, time.Time, error)
 	}
 
 	if !found {
-		return "", fmt.Errorf("%s logs not found", keyword)
+		return "", latestTime, fmt.Errorf("%s logs not found", keyword)
 	}
 
-	return latestLog, nil
+	return latestLog, latestTime, nil
 }
 
 func getExtLog(client *sftp.Client, logs []os.FileInfo, srn string) ([]string, time.Time, error) {
