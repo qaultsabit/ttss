@@ -89,9 +89,10 @@ func getlogs(srn, dir string) ([]string, error) {
 
 	wg.Wait()
 
-	// check time difference between the two
 	if extModTime.Sub(atmModTime).Minutes() > 2 || atmModTime.Sub(extModTime).Minutes() > 2 {
-		os.RemoveAll(dir)
+		for _, log := range result {
+			os.Remove(filepath.Join(dir, log))
+		}
 		return result, fmt.Errorf("production mode")
 	}
 
