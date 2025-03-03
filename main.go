@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -33,20 +34,20 @@ func main() {
 	}
 	srn, dir := os.Args[1], os.Args[2]
 
-	logs, err := getlogs(srn, dir)
+	files, err := getlogs(srn, dir)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	for _, log := range logs {
-		fmt.Println(log)
-	}
+	// err = getDoc(srn, dir)
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	return
+	// }
 
-	err = getDoc(srn, dir)
-	if err != nil {
-		fmt.Println(err)
-		return
+	for _, file := range files {
+		fmt.Println(file)
 	}
 }
 
@@ -71,41 +72,62 @@ func getlogs(srn, dir string) ([]string, error) {
 	var extModTime time.Time
 	var atmModTime time.Time
 
-	for _, keyword := range keywords {
-		if keyword == "ext" {
-			extLogs, time, err := getExtLog(client, logs, srn)
-			extModTime = time
-			if err != nil {
-				return result, fmt.Errorf("error getting ext logs: %v", err)
-			}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 
-			for _, log := range extLogs {
-				if err := downloadLog(client, path.Join(logdir, log), filepath.Join(dir, log)); err != nil {
-					return result, fmt.Errorf("error downloading log: %v", err)
+	for _, keyword := range keywords {
+		wg.Add(1)
+		go func(keyword string) {
+			defer wg.Done()
+			if keyword == "ext" {
+				extLogs, time, err := getExtLog(client, logs, srn)
+				mu.Lock()
+				extModTime = time
+				mu.Unlock()
+				if err != nil {
+					fmt.Printf("error getting ext logs: %v\n", err)
+					return
 				}
 
+				for _, log := range extLogs {
+					if err := downloadLog(client, path.Join(logdir, log), filepath.Join(dir, log)); err != nil {
+						fmt.Printf("error downloading log: %v\n", err)
+						return
+					}
+
+					mu.Lock()
+					result = append(result, log)
+					mu.Unlock()
+				}
+			} else {
+				log, time, err := getLatestLog(logs, keyword)
+				if keyword == "atm" {
+					mu.Lock()
+					atmModTime = time
+					mu.Unlock()
+				}
+				if err != nil {
+					fmt.Printf("error getting log: %v\n", err)
+					return
+				}
+
+				if err := downloadLog(client, path.Join(logdir, log), filepath.Join(dir, log)); err != nil {
+					fmt.Printf("error downloading log: %v\n", err)
+					return
+				}
+
+				mu.Lock()
 				result = append(result, log)
+				mu.Unlock()
 			}
-		} else {
-			log, time, err := getLatestLog(logs, keyword)
-			if keyword == "atm" {
-				atmModTime = time
-			}
-			if err != nil {
-				return result, fmt.Errorf("error getting log: %v", err)
-			}
-
-			if err := downloadLog(client, path.Join(logdir, log), filepath.Join(dir, log)); err != nil {
-				return result, fmt.Errorf("error downloading log: %v", err)
-			}
-
-			result = append(result, log)
-		}
+		}(keyword)
 	}
+
+	wg.Wait()
 
 	if extModTime.Sub(atmModTime).Minutes() > 2 {
 		os.RemoveAll(dir)
-		return result, fmt.Errorf("dev mode is not active yet")
+		return result, fmt.Errorf("production mode")
 	}
 
 	return result, nil
@@ -159,31 +181,44 @@ func getLatestLog(logs []os.FileInfo, keyword string) (string, time.Time, error)
 func getExtLog(client *sftp.Client, logs []os.FileInfo, srn string) ([]string, time.Time, error) {
 	var result []string
 	var modTime time.Time
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
 	for _, log := range logs {
 		if log.IsDir() || !strings.HasPrefix(log.Name(), "ext") {
 			continue
 		}
 
-		logPath := path.Join(logdir, log.Name())
-		file, err := client.Open(logPath)
-		if err != nil {
-			return result, modTime, fmt.Errorf("error opening file: %v", err)
-		}
-
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			if strings.Contains(scanner.Text(), srn) {
-				result = append(result, log.Name())
-				modTime = log.ModTime()
-				break
+		wg.Add(1)
+		go func(log os.FileInfo) {
+			defer wg.Done()
+			logPath := path.Join(logdir, log.Name())
+			file, err := client.Open(logPath)
+			if err != nil {
+				fmt.Printf("error opening file: %v\n", err)
+				return
 			}
-		}
-		file.Close()
+			defer file.Close()
 
-		if err := scanner.Err(); err != nil {
-			return result, modTime, err
-		}
+			scanner := bufio.NewScanner(file)
+			for scanner.Scan() {
+				if strings.Contains(scanner.Text(), srn) {
+					mu.Lock()
+					result = append(result, log.Name())
+					modTime = log.ModTime()
+					mu.Unlock()
+					break
+				}
+			}
+
+			if err := scanner.Err(); err != nil {
+				fmt.Printf("error scanning file: %v\n", err)
+				return
+			}
+		}(log)
 	}
+
+	wg.Wait()
 
 	if len(result) == 0 {
 		return result, modTime, fmt.Errorf("ext logs not found")
