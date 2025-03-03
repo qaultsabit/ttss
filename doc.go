@@ -9,16 +9,16 @@ import (
 	excelize "github.com/xuri/excelize/v2"
 )
 
-func getDoc(srn, dir string) error {
+func getDoc(srn, dir string) (string, error) {
 	db, err := sql.Open("oracle", DBConn)
 	if err != nil {
-		return fmt.Errorf("failed to connect database: %v", err)
+		return "", fmt.Errorf("failed to connect database: %w", err)
 	}
 	defer db.Close()
 
 	rows, err := db.Query(query, srn)
 	if err != nil {
-		return fmt.Errorf("failed to execute query: %v", err)
+		return "", fmt.Errorf("failed to execute query: %w", err)
 	}
 	defer rows.Close()
 
@@ -28,39 +28,45 @@ func getDoc(srn, dir string) error {
 
 	columns, err := rows.Columns()
 	if err != nil {
-		return fmt.Errorf("failed to get columns: %v", err)
+		return "", fmt.Errorf("failed to get columns: %w", err)
 	}
 
 	for i, col := range columns {
-		cell := fmt.Sprintf("%s1", string(rune('A'+i)))
-		f.SetCellValue(sheetName, cell, col)
+		cell := fmt.Sprintf("%c1", 'A'+i)
+		if err := f.SetCellValue(sheetName, cell, col); err != nil {
+			return "", fmt.Errorf("failed to set header cell value: %w", err)
+		}
 	}
 
 	rowIndex := 2
 	for rows.Next() {
-		values := make([]any, len(columns))
+		values := make([]sql.NullString, len(columns))
 		dest := make([]any, len(columns))
 		for i := range values {
 			dest[i] = &values[i]
 		}
 
 		if err := rows.Scan(dest...); err != nil {
-			return fmt.Errorf("failed to scan row: %v", err)
+			return "", fmt.Errorf("failed to scan row: %w", err)
 		}
 
 		for i, val := range values {
-			cell := fmt.Sprintf("%s%d", string(rune('A'+i)), rowIndex)
-			if err := f.SetCellValue(sheetName, cell, fmt.Sprintf("%v", val)); err != nil {
-				return fmt.Errorf("failed to set cell value: %v", err)
+			cell := fmt.Sprintf("%c%d", 'A'+i, rowIndex)
+			cellValue := ""
+			if val.Valid {
+				cellValue = val.String
+			}
+			if err := f.SetCellValue(sheetName, cell, cellValue); err != nil {
+				return "", fmt.Errorf("failed to set cell value: %w", err)
 			}
 		}
 		rowIndex++
 	}
 
-	filePath := filepath.Join(dir, "doc.xlsx")
-	if err := f.SaveAs(filePath); err != nil {
-		return fmt.Errorf("failed to save Excel file: %v", err)
+	filename := filepath.Join(dir, fmt.Sprintf("%s.xlsx", srn))
+	if err := f.SaveAs(filename); err != nil {
+		return "", fmt.Errorf("failed to save Excel file: %w", err)
 	}
 
-	return nil
+	return filename, nil
 }

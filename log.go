@@ -18,18 +18,18 @@ import (
 func getlogs(srn, dir string) ([]string, error) {
 	var result []string
 	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
-		return result, fmt.Errorf("error creating directory: %v", err)
+		return result, fmt.Errorf("error creating directory: %w", err)
 	}
 
 	client, err := connectSFTP(address, user, password)
 	if err != nil {
-		return result, fmt.Errorf("error connecting to server: %v", err)
+		return result, fmt.Errorf("error connecting to server: %w", err)
 	}
 	defer client.Close()
 
 	logs, err := client.ReadDir(logdir)
 	if err != nil {
-		return result, fmt.Errorf("error getting logs: %v", err)
+		return result, fmt.Errorf("error getting logs: %w", err)
 	}
 
 	keywords := [4]string{"ext", "atm", "base", "bootstrap"}
@@ -89,10 +89,7 @@ func getlogs(srn, dir string) ([]string, error) {
 
 	wg.Wait()
 
-	if extModTime.Sub(atmModTime).Minutes() > 2 || atmModTime.Sub(extModTime).Minutes() > 2 {
-		for _, log := range result {
-			os.Remove(filepath.Join(dir, log))
-		}
+	if extModTime.Sub(atmModTime).Minutes() > 3 || atmModTime.Sub(extModTime).Minutes() > 3 {
 		return result, fmt.Errorf("production mode")
 	}
 
@@ -208,4 +205,19 @@ func downloadLog(client *sftp.Client, remotePath, localPath string) error {
 
 	_, err = io.Copy(dstFile, srcFile)
 	return err
+}
+
+func rollBack(dir string) {
+	files, err := filepath.Glob(filepath.Join(dir, "*"))
+	if err != nil {
+		fmt.Printf("error getting files: %v\n", err)
+		return
+	}
+
+	for _, file := range files {
+		if err := os.Remove(file); err != nil {
+			fmt.Printf("error removing file: %v\n", err)
+			return
+		}
+	}
 }

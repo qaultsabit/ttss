@@ -23,17 +23,25 @@ func main() {
 
 	files, err := getlogs(srn, dir)
 	if err != nil {
+		rollBack(dir)
 		fmt.Println(err)
 		return
 	}
 
-	// err = getDoc(srn, dir)
-	// if err != nil {
-	// 	fmt.Println(err)
-	// 	return
-	// }
+	doc, err := getDoc(srn, dir)
+	if err != nil {
+		rollBack(dir)
+		fmt.Println(err)
+		return
+	}
+
+	if len(files) < 4 {
+		rollBack(dir)
+		return
+	}
 
 	for _, file := range files {
 		fmt.Println(file)
 	}
+	fmt.Println(doc)
 }
