@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -72,7 +73,7 @@ func getAnotherLogs(sshClient *ssh.Client) ([]string, error) {
 	for i, keyword := range keywords {
 		log, err := getLatestLog(sshClient, keyword)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get latest log for keyword %s: %w", keyword, err)
+			return nil, fmt.Errorf("failed to get %s log: %w", keyword, err)
 		}
 		logs[i] = log
 	}
@@ -141,9 +142,9 @@ func downloadLogs(sftpClient *sftp.Client, logs []string, dest string) ([]string
 		go func(log string) {
 			defer wg.Done()
 			remotePath := fmt.Sprintf("%s/%s", logdir, log)
-			localPath := fmt.Sprintf("%s/%s", dest, log)
+			localPath := filepath.Join(dest, log)
 			if err := downloadFile(sftpClient, remotePath, localPath); err != nil {
-				errChan <- fmt.Errorf("failed downloading file %s: %w", log, err)
+				errChan <- fmt.Errorf("failed downloading %s: %w", log, err)
 			}
 		}(log)
 	}
