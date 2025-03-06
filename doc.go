@@ -32,7 +32,8 @@ func getDoc(srn, dir string) (string, error) {
 	}
 
 	for i, col := range columns {
-		cell := fmt.Sprintf("%c1", 'A'+i)
+		colName, _ := excelize.ColumnNumberToName(i + 1)
+		cell := fmt.Sprintf("%s1", colName)
 		if err := f.SetCellValue(sheetName, cell, col); err != nil {
 			return "", fmt.Errorf("failed to set header cell value: %w", err)
 		}
@@ -51,7 +52,8 @@ func getDoc(srn, dir string) (string, error) {
 		}
 
 		for i, val := range values {
-			cell := fmt.Sprintf("%c%d", 'A'+i, rowIndex)
+			colName, _ := excelize.ColumnNumberToName(i + 1)
+			cell := fmt.Sprintf("%s%d", colName, rowIndex)
 			cellValue := ""
 			if val.Valid {
 				cellValue = val.String
