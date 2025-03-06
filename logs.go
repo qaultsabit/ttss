@@ -54,13 +54,13 @@ func connect(addr, user, password string) (*ssh.Client, *sftp.Client, error) {
 
 	conn, err := ssh.Dial("tcp", addr, config)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to dial SSH: %w", err)
+		return nil, nil, err
 	}
 
 	sftpClient, err := sftp.NewClient(conn)
 	if err != nil {
 		conn.Close()
-		return nil, nil, fmt.Errorf("failed to create SFTP client: %w", err)
+		return nil, nil, err
 	}
 
 	return conn, sftpClient, nil
@@ -73,7 +73,7 @@ func getAnotherLogs(sshClient *ssh.Client) ([]string, error) {
 	for i, keyword := range keywords {
 		log, err := getLatestLog(sshClient, keyword)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get %s log: %w", keyword, err)
+			return nil, err
 		}
 		logs[i] = log
 	}
@@ -85,7 +85,7 @@ func getLatestLog(sshClient *ssh.Client, keyword string) (string, error) {
 	cmd := fmt.Sprintf("ls -t %s/%s* | head -n 1 | xargs -I {} basename {}", logdir, keyword)
 	output, err := runCommand(sshClient, cmd)
 	if err != nil || output == "" {
-		return "", fmt.Errorf("%s log not found: %w", keyword, err)
+		return "", fmt.Errorf("%s log not found", keyword)
 	}
 	return strings.TrimSpace(output), nil
 }
@@ -94,7 +94,7 @@ func getExtLogs(sshClient *ssh.Client, srn string) ([]string, error) {
 	cmd := fmt.Sprintf("grep -rl %s --include=ext* %s | xargs -I {} basename {}", srn, logdir)
 	output, err := runCommand(sshClient, cmd)
 	if err != nil || output == "" {
-		return nil, fmt.Errorf("ext logs not found: %w", err)
+		return nil, fmt.Errorf("ext logs not found")
 	}
 	return strings.Split(strings.TrimSpace(output), "\n"), nil
 }
@@ -102,13 +102,13 @@ func getExtLogs(sshClient *ssh.Client, srn string) ([]string, error) {
 func runCommand(sshClient *ssh.Client, command string) (string, error) {
 	session, err := sshClient.NewSession()
 	if err != nil {
-		return "", fmt.Errorf("failed to create SSH session: %w", err)
+		return "", err
 	}
 	defer session.Close()
 
 	output, err := session.CombinedOutput(command)
 	if err != nil {
-		return "", fmt.Errorf("command failed: %w, output: %s", err, string(output))
+		return "", err
 	}
 
 	return string(output), nil
@@ -144,7 +144,7 @@ func downloadLogs(sftpClient *sftp.Client, logs []string, dest string) ([]string
 			remotePath := fmt.Sprintf("%s/%s", logdir, log)
 			localPath := filepath.Join(dest, log)
 			if err := downloadFile(sftpClient, remotePath, localPath); err != nil {
-				errChan <- fmt.Errorf("failed downloading %s: %w", log, err)
+				errChan <- err
 			}
 		}(log)
 	}
@@ -164,18 +164,18 @@ func downloadLogs(sftpClient *sftp.Client, logs []string, dest string) ([]string
 func downloadFile(sftpClient *sftp.Client, remotePath, localPath string) error {
 	srcFile, err := sftpClient.Open(remotePath)
 	if err != nil {
-		return fmt.Errorf("failed to open remote file: %w", err)
+		return err
 	}
 	defer srcFile.Close()
 
 	dstFile, err := os.Create(localPath)
 	if err != nil {
-		return fmt.Errorf("failed to create local file: %w", err)
+		return err
 	}
 	defer dstFile.Close()
 
 	if _, err := srcFile.WriteTo(dstFile); err != nil {
-		return fmt.Errorf("failed to write to local file: %w", err)
+		return err
 	}
 
 	return nil
