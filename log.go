@@ -1,12 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"io"
+	"math"
 	"os"
-	"path"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -15,88 +12,38 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func getlogs(srn, dir string) ([]string, error) {
-	var result []string
-	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
-		return result, fmt.Errorf("error creating directory: %w", err)
+func getLogs(srn, dest string) ([]string, error) {
+	if err := os.MkdirAll(dest, os.ModePerm); err != nil {
+		return nil, err
 	}
 
-	client, err := connectSFTP(address, user, password)
+	sshClient, sftpClient, err := connect(address, user, password)
 	if err != nil {
-		return result, fmt.Errorf("error connecting to server: %w", err)
+		return nil, err
 	}
-	defer client.Close()
+	defer sshClient.Close()
+	defer sftpClient.Close()
 
-	logs, err := client.ReadDir(logdir)
+	extLogs, err := getExtLogs(sshClient, srn)
 	if err != nil {
-		return result, fmt.Errorf("error getting logs: %w", err)
+		return nil, err
 	}
 
-	keywords := [4]string{"ext", "atm", "base", "bootstrap"}
-	var extModTime time.Time
-	var atmModTime time.Time
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
-	for _, keyword := range keywords {
-		wg.Add(1)
-		go func(keyword string) {
-			defer wg.Done()
-			if keyword == "ext" {
-				extLogs, time, err := getExtLog(client, logs, srn)
-				mu.Lock()
-				extModTime = time
-				mu.Unlock()
-				if err != nil {
-					fmt.Printf("error getting ext logs: %v\n", err)
-					return
-				}
-
-				for _, log := range extLogs {
-					if err := downloadLog(client, path.Join(logdir, log), filepath.Join(dir, log)); err != nil {
-						fmt.Printf("error downloading log: %v\n", err)
-						return
-					}
-
-					mu.Lock()
-					result = append(result, log)
-					mu.Unlock()
-				}
-			} else {
-				log, time, err := getLatestLog(logs, keyword)
-				if keyword == "atm" {
-					mu.Lock()
-					atmModTime = time
-					mu.Unlock()
-				}
-				if err != nil {
-					fmt.Printf("error getting log: %v\n", err)
-					return
-				}
-
-				if err := downloadLog(client, path.Join(logdir, log), filepath.Join(dir, log)); err != nil {
-					fmt.Printf("error downloading log: %v\n", err)
-					return
-				}
-
-				mu.Lock()
-				result = append(result, log)
-				mu.Unlock()
-			}
-		}(keyword)
+	anotherLogs, err := getAnotherLogs(sshClient)
+	if err != nil {
+		return nil, err
 	}
 
-	wg.Wait()
-
-	if extModTime.Sub(atmModTime).Minutes() > 3 || atmModTime.Sub(extModTime).Minutes() > 3 {
-		return result, fmt.Errorf("production mode")
+	if isProd, err := isProdMode(sftpClient, extLogs[0], anotherLogs[0]); err != nil {
+		return nil, err
+	} else if isProd {
+		return nil, fmt.Errorf("production mode")
 	}
 
-	return result, nil
+	return downloadLogs(sftpClient, append(extLogs, anotherLogs...), dest)
 }
 
-func connectSFTP(addr, user, password string) (*sftp.Client, error) {
+func connect(addr, user, password string) (*ssh.Client, *sftp.Client, error) {
 	config := &ssh.ClientConfig{
 		User:            user,
 		Auth:            []ssh.AuthMethod{ssh.Password(password)},
@@ -106,118 +53,129 @@ func connectSFTP(addr, user, password string) (*sftp.Client, error) {
 
 	conn, err := ssh.Dial("tcp", addr, config)
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("failed to dial SSH: %w", err)
 	}
 
-	client, err := sftp.NewClient(conn)
+	sftpClient, err := sftp.NewClient(conn)
 	if err != nil {
 		conn.Close()
-		return nil, err
+		return nil, nil, fmt.Errorf("failed to create SFTP client: %w", err)
 	}
 
-	return client, nil
+	return conn, sftpClient, nil
 }
 
-func getLatestLog(logs []os.FileInfo, keyword string) (string, time.Time, error) {
-	var latestLog string
-	var latestTime time.Time
-	found := false
+func getAnotherLogs(sshClient *ssh.Client) ([]string, error) {
+	keywords := []string{"atm", "base", "bootstrap"}
+	logs := make([]string, len(keywords))
 
-	for _, log := range logs {
-		if log.IsDir() || !strings.HasPrefix(log.Name(), keyword) {
-			continue
+	for i, keyword := range keywords {
+		log, err := getLatestLog(sshClient, keyword)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get latest log for keyword %s: %w", keyword, err)
 		}
-		if log.ModTime().After(latestTime) {
-			latestTime = log.ModTime()
-			latestLog = log.Name()
-			found = true
-		}
+		logs[i] = log
 	}
 
-	if !found {
-		return "", latestTime, fmt.Errorf("%s logs not found", keyword)
-	}
-
-	return latestLog, latestTime, nil
+	return logs, nil
 }
 
-func getExtLog(client *sftp.Client, logs []os.FileInfo, srn string) ([]string, time.Time, error) {
-	var result []string
-	var modTime time.Time
+func getLatestLog(sshClient *ssh.Client, keyword string) (string, error) {
+	cmd := fmt.Sprintf("ls -t %s/%s* | head -n 1 | xargs -I {} basename {}", logdir, keyword)
+	output, err := runCommand(sshClient, cmd)
+	if err != nil || output == "" {
+		return "", fmt.Errorf("%s log not found: %w", keyword, err)
+	}
+	return strings.TrimSpace(output), nil
+}
+
+func getExtLogs(sshClient *ssh.Client, srn string) ([]string, error) {
+	cmd := fmt.Sprintf("grep -rl %s --include=ext* %s | xargs -I {} basename {}", srn, logdir)
+	output, err := runCommand(sshClient, cmd)
+	if err != nil || output == "" {
+		return nil, fmt.Errorf("ext logs not found: %w", err)
+	}
+	return strings.Split(strings.TrimSpace(output), "\n"), nil
+}
+
+func runCommand(sshClient *ssh.Client, command string) (string, error) {
+	session, err := sshClient.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("failed to create SSH session: %w", err)
+	}
+	defer session.Close()
+
+	output, err := session.CombinedOutput(command)
+	if err != nil {
+		return "", fmt.Errorf("command failed: %w, output: %s", err, string(output))
+	}
+
+	return string(output), nil
+}
+
+func isProdMode(sftpClient *sftp.Client, extLog, atmLog string) (bool, error) {
+	extFileInfo, err := sftpClient.Stat(fmt.Sprintf("%s/%s", logdir, extLog))
+	if err != nil {
+		return false, err
+	}
+	extModTime := extFileInfo.ModTime()
+
+	atmFileInfo, err := sftpClient.Stat(fmt.Sprintf("%s/%s", logdir, atmLog))
+	if err != nil {
+		return false, err
+	}
+	atmModTime := atmFileInfo.ModTime()
+
+	if math.Abs(atmModTime.Sub(extModTime).Minutes()) > 3 {
+		return true, fmt.Errorf("production mode")
+	}
+
+	return false, nil
+}
+
+func downloadLogs(sftpClient *sftp.Client, logs []string, dest string) ([]string, error) {
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-
+	errChan := make(chan error, len(logs))
 	for _, log := range logs {
-		if log.IsDir() || !strings.HasPrefix(log.Name(), "ext") {
-			continue
-		}
-
 		wg.Add(1)
-		go func(log os.FileInfo) {
+		go func(log string) {
 			defer wg.Done()
-			logPath := path.Join(logdir, log.Name())
-			file, err := client.Open(logPath)
-			if err != nil {
-				fmt.Printf("error opening file: %v\n", err)
-				return
-			}
-			defer file.Close()
-
-			scanner := bufio.NewScanner(file)
-			for scanner.Scan() {
-				if strings.Contains(scanner.Text(), srn) {
-					mu.Lock()
-					result = append(result, log.Name())
-					modTime = log.ModTime()
-					mu.Unlock()
-					break
-				}
-			}
-
-			if err := scanner.Err(); err != nil {
-				fmt.Printf("error scanning file: %v\n", err)
-				return
+			remotePath := fmt.Sprintf("%s/%s", logdir, log)
+			localPath := fmt.Sprintf("%s/%s", dest, log)
+			if err := downloadFile(sftpClient, remotePath, localPath); err != nil {
+				errChan <- fmt.Errorf("failed downloading file %s: %w", log, err)
 			}
 		}(log)
 	}
 
 	wg.Wait()
+	close(errChan)
 
-	if len(result) == 0 {
-		return result, modTime, fmt.Errorf("ext logs not found")
+	for err := range errChan {
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	return result, modTime, nil
+	return logs, nil
 }
 
-func downloadLog(client *sftp.Client, remotePath, localPath string) error {
-	srcFile, err := client.Open(remotePath)
+func downloadFile(sftpClient *sftp.Client, remotePath, localPath string) error {
+	srcFile, err := sftpClient.Open(remotePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open remote file: %w", err)
 	}
 	defer srcFile.Close()
 
 	dstFile, err := os.Create(localPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create local file: %w", err)
 	}
 	defer dstFile.Close()
 
-	_, err = io.Copy(dstFile, srcFile)
-	return err
-}
-
-func rollBack(dir string) {
-	files, err := filepath.Glob(filepath.Join(dir, "*"))
-	if err != nil {
-		fmt.Printf("error getting files: %v\n", err)
-		return
+	if _, err := srcFile.WriteTo(dstFile); err != nil {
+		return fmt.Errorf("failed to write to local file: %w", err)
 	}
 
-	for _, file := range files {
-		if err := os.Remove(file); err != nil {
-			fmt.Printf("error removing file: %v\n", err)
-			return
-		}
-	}
+	return nil
 }

@@ -9,7 +9,7 @@ import (
 	excelize "github.com/xuri/excelize/v2"
 )
 
-func getDoc(srn, dir string) (string, error) {
+func getDoc(srn, dest string) (string, error) {
 	db, err := sql.Open("oracle", DBConn)
 	if err != nil {
 		return "", fmt.Errorf("failed to connect database: %w", err)
@@ -65,7 +65,7 @@ func getDoc(srn, dir string) (string, error) {
 		rowIndex++
 	}
 
-	filename := filepath.Join(dir, fmt.Sprintf("%s.xlsx", srn))
+	filename := filepath.Join(dest, fmt.Sprintf("%s.xlsx", srn))
 	if err := f.SaveAs(filename); err != nil {
 		return "", fmt.Errorf("failed to save Excel file: %w", err)
 	}

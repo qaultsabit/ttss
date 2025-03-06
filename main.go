@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 const (
@@ -11,37 +12,47 @@ const (
 	password string = "password"
 	logdir   string = "/home/tsabit/logs"
 	DBConn   string = "oracle://user:password@host:1521/service_name"
-	query    string = "SELECT * FROM DOC WHERE srn = :1"
+	query    string = "SELECT * FROM DOC WHERE SOURCE_REG_NUM = :1"
 )
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("usage: ttss <srn> <dir>")
+		fmt.Println("usage: ts <srn> <dir>")
 		return
 	}
-	srn, dir := os.Args[1], os.Args[2]
+	srn, dest := os.Args[1], os.Args[2]
 
-	files, err := getlogs(srn, dir)
+	files, err := getLogs(srn, dest)
 	if err != nil {
-		rollBack(dir)
 		fmt.Println(err)
 		return
 	}
 
-	doc, err := getDoc(srn, dir)
-	if err != nil {
-		rollBack(dir)
-		fmt.Println(err)
-		return
-	}
+	// doc, err := getDoc(srn, dest)
+	// if err != nil {
+	//     fmt.Println(err)
+	//     return
+	// }
+	// files = append(files, doc)
 
 	if len(files) < 4 {
-		rollBack(dir)
+		rollBack(dest)
 		return
 	}
 
 	for _, file := range files {
 		fmt.Println(file)
 	}
-	fmt.Println(doc)
+}
+
+func rollBack(dest string) {
+	files, err := filepath.Glob(filepath.Join(dest, "*"))
+	if err != nil {
+		fmt.Println("failed")
+		return
+	}
+
+	for _, file := range files {
+		os.Remove(file)
+	}
 }
