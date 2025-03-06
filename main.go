@@ -17,7 +17,7 @@ const (
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("usage: ts <srn> <dir>")
+		fmt.Println("usage: ts <srn> <dest>")
 		return
 	}
 	srn, dest := os.Args[1], os.Args[2]
